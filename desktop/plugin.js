@@ -1,0 +1,359 @@
+/**
+ * Project Tracker — desktop UI.
+ * A full page at /projects: the projects routine (Ongoing/Building/Maintenance/
+ * Ideas/Done) with staleness badges, per-project done/left checklists, inline
+ * session logging and quick edits. All writes go through the plugin's backend
+ * (ctx.rest), same store the agent tools use.
+ * Accents use var(--accent); surfaces/borders ride Hermes theme vars so it
+ * reskins.
+ */
+import { host, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
+import { useCallback, useEffect, useState } from 'react'
+import { jsxs, jsx } from 'react/jsx-runtime'
+
+const ID = 'project-tracker'
+const SECTIONS = ['Ongoing (Business)', 'Building', 'Maintenance', 'Ideas', 'Done']
+const SECTION_HINT = {
+  'Ongoing (Business)': 'Business — never drops; it pauses, doesn\u2019t die',
+  'Building': '2 weeks without a logged session flags it',
+  'Maintenance': 'upkeep only — checkup every 6 weeks',
+  'Ideas': 'promote within 3 Sundays or park',
+  'Done': 'an App done here means moved to Maintenance, not deleted',
+}
+
+let CTX = null
+async function api(path, opts) {
+  if (CTX?.rest) return CTX.rest(path, { method: opts?.method || 'GET', body: opts?.body })
+  const r = await fetch(`/api/plugins/${ID}${path}`, {
+    method: opts?.method || 'GET',
+    headers: { 'content-type': 'application/json' },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+  })
+  return r.json()
+}
+
+const labelColor = { Business: '#4caf7d', App: 'var(--accent)', Personal: '#c98a4b', Idea: '#8f8fa6' }
+const stale = (p) => p.staleness?.stale
+const idle = (p) => (p.staleness?.days_idle == null ? null : p.staleness.days_idle)
+
+function Badge({ text, tone }) {
+  const colors = {
+    stale: { color: '#ff6b5e', borderColor: 'rgba(255,107,94,0.45)', background: 'rgba(255,107,94,0.12)' },
+    okstale: { color: '#e2b93b', borderColor: 'rgba(226,185,59,0.4)', background: 'rgba(226,185,59,0.1)' },
+    label: { color: 'var(--ui-text-tertiary, #8f8da6)', borderColor: 'var(--ui-stroke-secondary, rgba(140,140,170,0.3))', background: 'transparent' },
+  }
+  return jsx('span', {
+    style: {
+      fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 999,
+      border: `1px solid ${colors[tone].borderColor}`, background: colors[tone].background,
+      color: colors[tone].color, whiteSpace: 'nowrap',
+    },
+    children: text,
+  })
+}
+
+function ItemRow({ p, side, item, onToggle, onRemove }) {
+  const checked = side === 'done'
+  return jsxs('div', {
+    style: { display: 'flex', alignItems: 'flex-start', gap: 6, padding: '2px 0', fontSize: 12 },
+    children: [
+      jsx('button', {
+        title: checked ? 'Move back to left' : 'Mark done',
+        onClick: () => onToggle(p, side, item.text),
+        onMouseDown: (e) => e.stopPropagation(),
+        style: { border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
+          fontSize: 12, color: checked ? '#4caf7d' : 'var(--ui-text-tertiary, #8f8da6)',
+          lineHeight: 1.3 },
+        children: checked ? '\u2611' : '\u2610',
+      }),
+      jsx('span', {
+        style: { flex: 1, color: 'var(--ui-text-secondary, #c9c8d4)',
+          textDecoration: checked ? 'line-through' : 'none', opacity: checked ? 0.7 : 1 },
+        children: item.text,
+      }),
+      jsx('button', {
+        title: 'Remove item',
+        onMouseDown: (e) => e.stopPropagation(),
+        onClick: () => onRemove(p, side, item.text),
+        style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 10,
+          color: 'var(--ui-text-tertiary, #8f8da6)', padding: '0 3px' },
+        children: '\u2715',
+      }),
+    ],
+  })
+}
+
+function ProjectCard({ p, open, onOpen, reload }) {
+  const [logText, setLogText] = useState('')
+  const [logDate, setLogDate] = useState('')
+  const [nextAction, setNextAction] = useState(p.next_action || '')
+  const [newLeft, setNewLeft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const post = useCallback(async (path, body) => {
+    setSaving(true)
+    try { await api(path, { method: 'POST', body }) } finally { setSaving(false) }
+    reload()
+  }, [reload])
+
+  const st = p.staleness || {}
+  const isBusiness = p.section === 'Ongoing (Business)'
+
+  return jsxs('div', {
+    style: {
+      borderRadius: 10, border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+      background: 'var(--ui-card, var(--card, rgba(255,255,255,0.03)))',
+      padding: '10px 12px', marginBottom: 8,
+    },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' },
+        onClick: () => onOpen(open ? null : p.name),
+        children: [
+          jsx('span', { style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary, #fafafa)' }, children: p.name }),
+          jsx(Badge, { text: p.label, tone: 'label' }),
+          stale(p) && jsx(Badge, { text: `STALE \u00B7 ${st.days_idle}d`, tone: 'stale' }),
+          !stale(p) && !isBusiness && idle(p) != null && jsx(Badge, { text: `${idle(p)}d idle`, tone: 'okstale' }),
+          isBusiness && !p.phase && !p.next_action && jsx(Badge, { text: 'paused', tone: 'okstale' }),
+          jsx('span', { style: { marginLeft: 'auto', fontSize: 10.5, color: 'var(--ui-text-tertiary, #8f8da6)' },
+            children: p.phase || st.rule || '' }),
+        ],
+      }),
+      !open && p.next_action && jsx('div', {
+        style: { fontSize: 11.5, color: 'var(--ui-text-tertiary, #8f8da6)', marginTop: 4 },
+        children: `Next: ${p.next_action}`,
+      }),
+      open && jsxs('div', {
+        style: { marginTop: 8, borderTop: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.25))', paddingTop: 6 },
+        children: [
+          jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+            children: [
+              jsxs('div', {}, [
+                jsx('div', { style: { fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4,
+                  color: 'var(--ui-text-tertiary, #8f8da6)', margin: '4px 0' }, children: 'Left to complete' }),
+                p.left.map((i, k) => jsx(ItemRow, { p, side: 'left', item: i, key: k,
+                  onToggle: (pp, side, text) => post('/item', { name: pp.name, action: 'check', side, text }),
+                  onRemove: (pp, side, text) => post('/item', { name: pp.name, action: 'remove', side, text }) })),
+                jsx('input', {
+                  value: newLeft, placeholder: 'add item + Enter',
+                  onChange: (e) => setNewLeft(e.target.value),
+                  onKeyDown: (e) => { if (e.key === 'Enter' && newLeft.trim()) { post('/item', { name: p.name, action: 'add', side: 'left', text: newLeft.trim() }); setNewLeft('') } },
+                  onMouseDown: (e) => e.stopPropagation(),
+                  style: { width: '100%', fontSize: 11, marginTop: 4, borderRadius: 6, padding: '4px 8px',
+                    background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                    color: 'var(--ui-text-primary, #fafafa)', outline: 'none' },
+                }),
+              ]),
+              jsx('div', {}, [
+                jsx('div', { style: { fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4,
+                  color: 'var(--ui-text-tertiary, #8f8da6)', margin: '4px 0' }, children: 'Done' }),
+                p.done.map((i, k) => jsx(ItemRow, { p, side: 'done', item: i, key: k,
+                  onToggle: (pp, side, text) => post('/item', { name: pp.name, action: 'uncheck', side, text }),
+                  onRemove: (pp, side, text) => post('/item', { name: pp.name, action: 'remove', side, text }) })),
+              ]),
+            ],
+          }),
+          jsxs('div', { style: { marginTop: 10, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }, children: [
+            jsx('input', {
+              value: logText, placeholder: 'log a 1-hour session\u2026',
+              onChange: (e) => setLogText(e.target.value),
+              onMouseDown: (e) => e.stopPropagation(),
+              onKeyDown: (e) => { if (e.key === 'Enter' && logText.trim()) { post('/session', { name: p.name, text: logText.trim(), date: logDate || undefined }); setLogText('') } },
+              style: { flex: 1, minWidth: 160, fontSize: 11.5, borderRadius: 6, padding: '5px 8px',
+                background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                color: 'var(--ui-text-primary, #fafafa)', outline: 'none' },
+            }),
+            jsx('input', {
+              type: 'date', value: logDate, onChange: (e) => setLogDate(e.target.value),
+              onMouseDown: (e) => e.stopPropagation(),
+              style: { fontSize: 11, borderRadius: 6, padding: '4px 6px',
+                background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                color: 'var(--ui-text-primary, #fafafa)', outline: 'none' },
+            }),
+            jsx('button', {
+              disabled: !logText.trim() || saving,
+              onClick: () => { post('/session', { name: p.name, text: logText.trim(), date: logDate || undefined }); setLogText('') },
+              style: { fontSize: 11, padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+                border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                background: 'var(--accent, #6c5ce7)', color: '#fff', fontWeight: 600,
+                opacity: !logText.trim() || saving ? 0.5 : 1 },
+              children: 'Log',
+            }),
+          ] }),
+          jsxs('div', { style: { marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }, children: [
+            jsx('input', {
+              value: nextAction, placeholder: 'next action\u2026',
+              onChange: (e) => setNextAction(e.target.value),
+              onMouseDown: (e) => e.stopPropagation(),
+              style: { flex: 1, fontSize: 11.5, borderRadius: 6, padding: '5px 8px',
+                background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                color: 'var(--ui-text-primary, #fafafa)', outline: 'none' },
+            }),
+            (nextAction !== (p.next_action || '')) && jsx('button', {
+              onClick: () => post('/set', { name: p.name, next_action: nextAction.trim() }),
+              style: { fontSize: 11, padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+                border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+                background: 'transparent', color: 'var(--accent, #6c5ce7)', fontWeight: 600 },
+              children: 'Save next action',
+            }),
+          ] }),
+          jsxs('div', { style: { marginTop: 6, fontSize: 10.5, color: 'var(--ui-text-quaternary, #77768c)', display: 'flex', gap: 10, flexWrap: 'wrap' }, children: [
+            jsx('span', { children: `label ${p.label} \u00B7 section ${p.section}` }),
+            jsx('span', { children: `created ${p.created}` }),
+            jsx('span', { children: `last update ${p.last_update}` }),
+            p.promote_by && jsx('span', { children: `promote by ${p.promote_by}` }),
+            p.repo && jsx('span', { children: p.repo }),
+          ] }),
+        ],
+      }),
+    ],
+  })
+}
+
+function NewProjectForm({ reload }) {
+  const [open, setOpen] = useState(false)
+  const [f, setF] = useState({ name: '', label: 'App', phase: '', next_action: '' })
+  const [saving, setSaving] = useState(false)
+  if (!open) {
+    return jsx('button', {
+      onClick: () => setOpen(true),
+      style: { fontSize: 11.5, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
+        border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+        background: 'transparent', color: 'var(--ui-text-secondary, #c9c8d4)' },
+      children: '+ Track a project',
+    })
+  }
+  const submit = async () => {
+    if (!f.name.trim() || saving) return
+    setSaving(true)
+    try {
+      await api('/project', { method: 'POST', body: { name: f.name.trim(), label: f.label, phase: f.phase.trim(), next_action: f.next_action.trim() } })
+      setOpen(false); setF({ name: '', label: 'App', phase: '', next_action: '' })
+      reload()
+    } finally { setSaving(false) }
+  }
+  const inp = (key, ph, style2) => jsx('input', {
+    value: f[key], placeholder: ph,
+    onChange: (e) => setF((o) => ({ ...o, [key]: e.target.value })),
+    onKeyDown: (e) => { if (e.key === 'Enter') submit() },
+    onMouseDown: (e) => e.stopPropagation(),
+    style: { fontSize: 11.5, borderRadius: 6, padding: '5px 8px',
+      background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+      color: 'var(--ui-text-primary, #fafafa)', outline: 'none', ...style2 },
+  })
+  return jsxs('div', {
+    style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 },
+    onMouseDown: (e) => e.stopPropagation(),
+    children: [
+      inp('name', 'project name', { width: 170 }),
+      jsx('select', {
+        value: f.label, onChange: (e) => setF((o) => ({ ...o, label: e.target.value })),
+        style: { fontSize: 11.5, borderRadius: 6, padding: '4px 6px',
+          background: 'rgba(127,127,127,0.08)', border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+          color: 'var(--ui-text-primary, #fafafa)', outline: 'none' },
+        children: ['Business', 'App', 'Personal', 'Idea'].map((l) => jsx('option', { value: l, children: l })),
+      }),
+      inp('phase', 'phase (optional)', { width: 150 }),
+      inp('next_action', 'next action (optional)', { width: 190 }),
+      jsx('button', {
+        onClick: submit, disabled: saving,
+        style: { fontSize: 11.5, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
+          border: 'none', background: 'var(--accent, #6c5ce7)', color: '#fff', fontWeight: 600 },
+        children: 'Add',
+      }),
+      jsx('button', {
+        onClick: () => setOpen(false),
+        style: { fontSize: 11.5, padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+          border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+          background: 'transparent', color: 'var(--ui-text-secondary, #c9c8d4)' },
+        children: 'Cancel',
+      }),
+    ],
+  })
+}
+
+function ProjectsPage() {
+  const [data, setData] = useState(null)
+  const [openName, setOpenName] = useState(null)
+  const [err, setErr] = useState('')
+
+  const reload = useCallback(async () => {
+    try {
+      const d = await api('/state')
+      if (d && d.projects) setData(d)
+      else if (d && d.error) setErr(d.error)
+    } catch (e) { setErr(String(e)) }
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  if (err) return jsx('div', { style: { padding: 20, color: 'var(--ui-text-secondary, #ccc)' }, children: `Backend unreachable: ${err}` })
+  if (!data) return jsx('div', { style: { padding: 20, color: 'var(--ui-text-tertiary, #888)' }, children: 'Loading projects\u2026' })
+
+  const staleList = data.projects.filter(stale)
+
+  return jsxs('div', {
+    style: { height: '100%', overflowY: 'auto', padding: '16px 20px', boxSizing: 'border-box' },
+    children: [
+      jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 10 }, children: [
+        jsx('h1', { style: { fontSize: 18, margin: 0, color: 'var(--ui-text-primary, #fafafa)' }, children: 'Projects' }),
+        jsx('span', { style: { fontSize: 11, color: 'var(--ui-text-tertiary, #8f8da6)' },
+          children: `${data.projects.length} tracked \u00B7 ${staleList.length} stale \u00B7 reviewed Sundays with Hermes \u00B7 1h/day on any project` }),
+        jsx('div', { style: { marginLeft: 'auto' }, children: jsx(NewProjectForm, { reload }) }),
+      ] }),
+      staleList.length > 0 && jsxs('div', {
+        style: { borderRadius: 10, border: '1px solid rgba(255,107,94,0.35)', background: 'rgba(255,107,94,0.07)',
+          padding: '8px 12px', marginBottom: 12, fontSize: 12, color: 'var(--ui-text-secondary, #c9c8d4)' },
+        children: [
+          jsx('span', { style: { fontWeight: 700, color: '#ff6b5e' }, children: 'Stale \u2014 decide at Sunday review: re-commit / park / drop. ' }),
+          jsx('span', { children: staleList.map((p) => `${p.name} (${p.staleness.days_idle != null ? `idle ${p.staleness.days_idle}d` : p.staleness.rule})`).join(' \u00B7 ') }),
+        ],
+      }),
+      SECTIONS.map((sec) => {
+        const list = data.projects.filter((p) => p.section === sec)
+        if (!list.length) return null
+        return jsxs('div', { key: sec, style: { marginBottom: 14 }, children: [
+          jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }, children: [
+            jsx('div', { style: { fontSize: 11.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
+              color: 'var(--ui-text-tertiary, #8f8da6)' }, children: sec }),
+            jsx('span', { style: { fontSize: 10.5, color: 'var(--ui-text-quaternary, #77768c)' },
+              children: SECTION_HINT[sec] || '' }),
+          ] }),
+          list.map((p) => jsx(ProjectCard, { p, key: p.name, open: openName === p.name,
+            onOpen: setOpenName, reload })),
+        ] })
+      }),
+      data.projects.length === 0 && jsx('div', { style: { fontSize: 12, color: 'var(--ui-text-tertiary, #8f8da6)' }, children: 'No projects tracked yet \u2014 add one above, or ask Hermes.' }),
+    ],
+  })
+}
+
+/* registration */
+export default {
+  id: ID,
+  name: 'Project Tracker',
+  register(ctx) {
+    CTX = ctx
+    ctx.register({
+      id: 'page',
+      area: ROUTES_AREA,
+      title: 'Projects',
+      data: { path: '/projects' },
+      render: () => jsx(ProjectsPage, {}),
+    })
+    ctx.register({
+      id: 'nav',
+      area: SIDEBAR_NAV_AREA,
+      data: { path: '/projects', label: 'Projects', codicon: 'checklist' },
+    })
+    ctx.register({
+      id: 'open',
+      area: PALETTE_AREA,
+      data: {
+        id: 'project-tracker.open', label: 'Open Projects',
+        keywords: ['projects', 'routine', 'review', 'stale'],
+        run: () => host.navigate('/projects'),
+      },
+    })
+  },
+}
