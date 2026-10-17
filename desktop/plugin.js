@@ -7,7 +7,7 @@
  * Accents use var(--accent); surfaces/borders ride Hermes theme vars so it
  * reskins.
  */
-import { host, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
+import { host, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, PANES_AREA } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useState } from 'react'
 import { jsxs, jsx } from 'react/jsx-runtime'
 
@@ -32,7 +32,6 @@ async function api(path, opts) {
   return r.json()
 }
 
-const labelColor = { Business: '#4caf7d', App: 'var(--accent)', Personal: '#c98a4b', Idea: '#8f8fa6' }
 const stale = (p) => p.staleness?.stale
 const idle = (p) => (p.staleness?.days_idle == null ? null : p.staleness.days_idle)
 
@@ -126,7 +125,7 @@ function ProjectCard({ p, open, onOpen, reload }) {
       open && jsxs('div', {
         style: { marginTop: 8, borderTop: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.25))', paddingTop: 6 },
         children: [
-          jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+          jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 },
             children: [
               jsxs('div', {}, [
                 jsx('div', { style: { fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4,
@@ -328,6 +327,65 @@ function ProjectsPage() {
   })
 }
 
+/* Right-rail companion: compact, sits where the Quota/Review panes dock. */
+function ProjectsRail() {
+  const [data, setData] = useState(null)
+  const reload = useCallback(async () => {
+    try {
+      const d = await api('/state')
+      if (d && d.projects) setData(d)
+    } catch { /* pane retries on next interaction */ }
+  }, [])
+  useEffect(() => { reload() }, [reload])
+  if (!data) return jsx('div', { style: { padding: 8, fontSize: 11, color: 'var(--ui-text-tertiary, #8f8da6)' }, children: 'Projects\u2026' })
+  const staleList = data.projects.filter(stale)
+  const open = (name) => {
+    host.navigate('/projects')
+  }
+  const row = (p) => jsxs('div', {
+    onClick: () => open(p.name),
+    style: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 4px', borderRadius: 6,
+      cursor: 'pointer', fontSize: 11.5 },
+    children: [
+      jsx('span', { style: { flex: 1, color: 'var(--ui-text-secondary, #c9c8d4)',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: p.name }),
+      stale(p) && jsx(Badge, { text: `${p.staleness.days_idle ?? '!'}d`, tone: 'stale' }),
+      !stale(p) && idle(p) != null && jsx(Badge, { text: `${idle(p)}d`, tone: 'okstale' }),
+    ],
+  })
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto', padding: '4px 2px' },
+    children: [
+      jsx('div', {
+        onClick: () => host.navigate('/projects'),
+        style: { display: 'flex', alignItems: 'baseline', gap: 6, padding: '2px 4px 6px', cursor: 'pointer' },
+        children: jsx('span', { style: { fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
+          color: 'var(--ui-text-tertiary, #8f8da6)' }, children: `Projects \u00B7 ${data.projects.length}` }),
+      }),
+      staleList.length > 0 && jsxs('div', {
+        style: { borderRadius: 8, border: '1px solid rgba(255,107,94,0.35)', background: 'rgba(255,107,94,0.08)',
+          padding: '5px 8px', marginBottom: 6, fontSize: 10.5, color: 'var(--ui-text-secondary, #c9c8d4)' },
+        children: [
+          jsx('div', { style: { fontWeight: 700, color: '#ff6b5e', marginBottom: 2 },
+            children: `\u23F2 Stale \u00B7 ${staleList.length} \u2014 review Sunday` }),
+          staleList.map((p) => row(p)),
+        ],
+      }),
+      SECTIONS.map((sec) => {
+        const list = data.projects.filter((p) => p.section === sec)
+        if (!list.length) return null
+        return jsx('div', { key: sec, style: { marginBottom: 8 }, children: [
+          jsx('div', { style: { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4,
+            color: 'var(--ui-text-quaternary, #77768c)', padding: '2px 4px' }, children: sec }),
+          list.map((p) => jsx('div', { key: p.name, children: row(p) })),
+        ] })
+      }),
+      jsx('div', { style: { marginTop: 'auto', paddingTop: 6, fontSize: 10, color: 'var(--ui-text-quaternary, #77768c)' },
+        children: 'review Sundays with Hermes \u00B7 click a project to open' }),
+    ],
+  })
+}
+
 /* registration */
 export default {
   id: ID,
@@ -354,6 +412,19 @@ export default {
         keywords: ['projects', 'routine', 'review', 'stale'],
         run: () => host.navigate('/projects'),
       },
+    })
+    // Right-rail pane: docks beside Quota/Review.
+    ctx.register({
+      id: 'rail',
+      area: PANES_AREA,
+      title: 'Projects',
+      order: 2,
+      data: {
+        placement: 'right',
+        dock: { pane: 'workspace', pos: 'right' },
+        width: '300px',
+      },
+      render: () => jsx(ProjectsRail, {}),
     })
   },
 }

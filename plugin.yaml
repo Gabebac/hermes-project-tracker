@@ -1,5 +1,5 @@
 name: project-tracker
-version: 0.1.0
+version: 0.1.1
 description: Projects routine tracker — the [[Projects]] lifecycle (Ongoing/Building/Maintenance/Ideas/Done), daily 1-hour session logs, staleness flags with evidence for the Sunday review. Agent tools + a Projects desktop tab.
 author: Pooh + Hermes
 provides_tools:
