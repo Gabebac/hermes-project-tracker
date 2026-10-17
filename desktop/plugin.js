@@ -413,7 +413,8 @@ export default {
         run: () => host.navigate('/projects'),
       },
     })
-    // Right-rail pane: docks beside Quota/Review.
+    // Right-rail pane: placement 'right' stacks it as a tab in the default
+    // right sidebar (beside Quota/Review); natively draggable anywhere after.
     ctx.register({
       id: 'rail',
       area: PANES_AREA,
@@ -421,7 +422,6 @@ export default {
       order: 2,
       data: {
         placement: 'right',
-        dock: { pane: 'workspace', pos: 'right' },
         width: '300px',
       },
       render: () => jsx(ProjectsRail, {}),
