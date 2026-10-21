@@ -51,6 +51,13 @@ function Badge({ text, tone }) {
   })
 }
 
+function briefSummary(b, err) {
+  if (err) return `evidence unavailable: ${err} (interview falls back to the static brief)`
+  if (!b) return 'evidence: not checked yet \u2014 hit Refresh evidence'
+  const s = b.sessions_checked || { pinned: 0, recent: 0 }
+  return `evidence: ${s.pinned} pinned \u00B7 ${s.recent} recent \u00B7 ${(b.unlogged || []).length} unlogged candidate${(b.unlogged || []).length === 1 ? '' : 's'} \u00B7 ${(b.stale_flags || []).length} stale \u00B7 built ${b.generated_at}`
+}
+
 function ItemRow({ p, side, item, onToggle, onRemove }) {
   const checked = side === 'done'
   return jsxs('div', {
@@ -275,6 +282,9 @@ function ProjectsPage() {
   const [data, setData] = useState(null)
   const [openName, setOpenName] = useState(null)
   const [err, setErr] = useState('')
+  const [brief, setBrief] = useState(null)
+  const [briefErr, setBriefErr] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
 
   const reload = useCallback(async () => {
     try {
@@ -284,7 +294,18 @@ function ProjectsPage() {
     } catch (e) { setErr(String(e)) }
   }, [])
 
-  useEffect(() => { reload() }, [reload])
+  const refreshAll = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const b = await api('/brief')
+      if (b && b.brief) setBrief(b)
+      else setBriefErr(b && b.error ? b.error : 'no evidence returned')
+    } catch (e) { setBriefErr(String(e)) }
+    setRefreshing(false)
+    reload()
+  }, [reload])
+
+  useEffect(() => { refreshAll() }, [refreshAll])   // refresh evidences the tracker too
 
   if (err) return jsx('div', { style: { padding: 20, color: 'var(--ui-text-secondary, #ccc)' }, children: `Backend unreachable: ${err}` })
   if (!data) return jsx('div', { style: { padding: 20, color: 'var(--ui-text-tertiary, #888)' }, children: 'Loading projects\u2026' })
@@ -294,10 +315,22 @@ function ProjectsPage() {
   return jsxs('div', {
     style: { height: '100%', overflowY: 'auto', padding: '16px 20px', boxSizing: 'border-box' },
     children: [
+      jsx('div', { style: { fontSize: 11, color: 'var(--ui-text-tertiary, #8f8da6)', marginBottom: 10 },
+        children: briefSummary(brief, briefErr) }),
       jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 10 }, children: [
         jsx('h1', { style: { fontSize: 18, margin: 0, color: 'var(--ui-text-primary, #fafafa)' }, children: 'Projects' }),
         jsx('span', { style: { fontSize: 11, color: 'var(--ui-text-tertiary, #8f8da6)' },
           children: `${data.projects.length} tracked \u00B7 ${staleList.length} stale \u00B7 reviewed Sundays with Hermes \u00B7 1h/day on any project` }),
+        jsx('button', {
+          title: 'Re-run the evidence pass: checks the pinned and recent desktop sessions against the tracker log, raises unlogged work, and refreshes the interview questions',
+          onClick: () => refreshAll(),
+          disabled: refreshing,
+          style: { fontSize: 11.5, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
+            border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.3))',
+            background: 'transparent', color: 'var(--accent, #6c5ce7)', fontWeight: 600,
+            opacity: refreshing ? 0.6 : 1 },
+          children: refreshing ? '\u21BB checking\u2026' : '\u21BB Refresh evidence',
+        }),
         jsx('button', {
           title: 'Open a new session and start the projects interview there',
           onClick: () => startInterview(),
@@ -338,13 +371,21 @@ function ProjectsPage() {
 /* Right-rail companion: compact, sits where the Quota/Review panes dock. */
 function ProjectsRail() {
   const [data, setData] = useState(null)
+  const [briefAt, setBriefAt] = useState('')
   const reload = useCallback(async () => {
     try {
       const d = await api('/state')
       if (d && d.projects) setData(d)
     } catch { /* pane retries on next interaction */ }
   }, [])
-  useEffect(() => { reload() }, [reload])
+  const refreshRail = useCallback(async () => {
+    try {
+      const b = await api('/brief')
+      if (b && b.generated_at) setBriefAt(b.generated_at)
+    } catch { /* keep the last stamp */ }
+    reload()
+  }, [reload])
+  useEffect(() => { refreshRail() }, [refreshRail])
   if (!data) return jsx('div', { style: { padding: 8, fontSize: 11, color: 'var(--ui-text-tertiary, #8f8da6)' }, children: 'Projects\u2026' })
   const staleList = data.projects.filter(stale)
   const open = (name) => {
@@ -370,6 +411,15 @@ function ProjectsRail() {
         children: [
           jsx('span', { style: { fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
             color: 'var(--ui-text-tertiary, #8f8da6)' }, children: `Projects \u00B7 ${data.projects.length}` }),
+          jsx('button', {
+            title: `Refresh evidence (pinned + recent sessions vs the tracker log)${briefAt ? ' \u00B7 last built ' + briefAt : ''}`,
+            onMouseDown: (e) => { e.preventDefault(); e.stopPropagation() },
+            onClick: (e) => { e.stopPropagation(); refreshRail() },
+            style: { fontSize: 10, padding: '1px 7px', borderRadius: 999, cursor: 'pointer',
+              border: '1px solid var(--ui-stroke-secondary, rgba(140,140,170,0.35))',
+              background: 'transparent', color: 'var(--ui-text-tertiary, #8f8da6)', fontWeight: 600 },
+            children: '\u21BB',
+          }),
           jsx('button', {
             title: 'Start a projects interview in a new session',
             onMouseDown: (e) => { e.preventDefault(); e.stopPropagation() },
@@ -400,15 +450,16 @@ function ProjectsRail() {
         ] })
       }),
       jsx('div', { style: { marginTop: 'auto', paddingTop: 6, fontSize: 10, color: 'var(--ui-text-quaternary, #77768c)' },
-        children: 'review Sundays with Hermes \u00B7 click a project to open' }),
+        children: `\u21BB evidence built ${briefAt || 'never'} \u00B7 review Sundays with Hermes \u00B7 click a project to open` }),
     ],
   })
 }
 
 /* Interview door: open a fresh desktop session pre-loaded with the interview
- * brief. Same gateway RPCs the app's own new-chat flow uses. */
-async function startInterview() {
-  const brief = [
+ * brief. The live evidence brief from GET /brief is used when the backend
+ * answers; the static brief below is the fallback (backend asleep / old build).
+ * Same gateway RPCs the app's own new-chat flow uses. */
+const DEFAULT_BRIEF = [
     "Run Pooh's projects interview now.", '',
     'Load the skill `projects-routine` and follow its "Sunday interview" procedure (evidence pass -> 5 question stages -> apply in one pass).',
     'You are in an interactive desktop session: use clarify() for the interview questions (batch independent ones, max 4-5 per call).',
@@ -417,12 +468,19 @@ async function startInterview() {
     'Then apply all confirmed answers in one pass: project_log / project_set / project_item, explicit section moves, update the tracker, write the vault week note (Hermes/Projects/Weekly per the vault-delivery docker path), sync [[Projects]], and report every change back.',
     'Nothing moves without his answer - never drop, park, promote, or complete silently.',
   ].join('\n')
+
+async function startInterview() {
+  let text = DEFAULT_BRIEF
+  try {
+    const b = await api('/brief')
+    if (b && b.brief) text = b.brief        // live evidence + current questions
+  } catch { /* keep the static brief */ }
   const created = await host.request('session.create', {
     title: `Projects interview \u2014 ${new Date().toISOString().slice(0, 10)}`,
   })
   const sid = created?.session_id || created?.info?.session_id
   if (!sid) return { error: created }
-  await host.request('prompt.submit', { session_id: sid, text: brief })
+  await host.request('prompt.submit', { session_id: sid, text })
   await host.request('session.activate', { session_id: sid })
   return { ok: true, session_id: sid }
 }

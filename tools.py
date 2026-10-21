@@ -99,6 +99,19 @@ TOOLS = [
         "summary": "Log a session on a project",
     },
     {
+        "name": "projects_brief",
+        "description": "Fresh evidence pass for the Sunday interview: pinned + recent desktop sessions (read-only), unlogged-work candidates vs the tracker log, stale flags, and the updated interview questions. Returns a pre-rendered 'brief' string for the interview prompt.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "number", "description": "look-back window in days, default 7"},
+            },
+            "required": [],
+        },
+        "handler": lambda args: _run(service.build_brief, args.get("days", 7)),
+        "summary": "Interview evidence brief",
+    },
+    {
         "name": "project_item",
         "description": "Mutate a project's checklist. action: add|check|uncheck|remove; side: done|left.",
         "parameters": {

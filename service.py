@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -233,3 +234,281 @@ def review(today: str | None = None) -> dict:
                        "promote or park Ideas past promote-by",
                        "pick 1-3 projects for next week",
                    ]}
+
+# ---------------------------------------------------------------------------
+# Refresh / evidence pass — pinned + recent desktop sessions vs the tracker log
+# (feeds the Sunday interview; read-only, the session DB is never written)
+# ---------------------------------------------------------------------------
+
+import sqlite3
+import time as _time
+
+
+def _state_db_path():
+    """The desktop app's session store (sessions table carries a pinned column)."""
+    import os as _os
+    env = _os.environ.get("PROJECT_TRACKER_STATE_DB")
+    if env and Path(env).exists():
+        return Path(env)
+    try:
+        from hermes_constants import get_hermes_home
+
+        p = Path(get_hermes_home()) / "state.db"
+        if p.exists():
+            return p
+    except Exception:  # noqa: BLE001 - fall through to filesystem guesses
+        pass
+    here = _data_dir().resolve()
+    for parent in [here, *here.parents[:4]]:
+        c = parent / "state.db"
+        if c.exists():
+            return c
+    guesses = [
+        Path.home() / "AppData" / "Local" / "hermes" / "state.db",
+        Path.home() / ".hermes" / "state.db",
+    ]
+    for g in guesses:
+        if g.exists():
+            return g
+    return None
+
+
+def _norm(s: str) -> str:
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def _sessions_window(days: int) -> dict:
+    """project -> [{date, text}] logged inside the window (from sessions.jsonl)."""
+    out: dict[str, list] = {}
+    cutoff = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
+    p = _sessions_path()
+    if p.exists():
+        for line in p.read_text().splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("date", "") >= cutoff:
+                out.setdefault(e.get("project", ""), []).append(e)
+    return out
+
+
+def _query_sessions(sql: str, args: tuple, previews: bool = False) -> list:
+    db = _state_db_path()
+    if not db:
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        rows = [dict(r) for r in con.execute(sql, args)]
+        if previews:
+            for r in rows:
+                r["preview"] = _first_user_prompt(con, r["id"])
+        con.close()
+        return rows
+    except sqlite3.Error:
+        return []
+
+
+def _first_user_prompt(con, sid: str) -> str:
+    try:
+        row = con.execute(
+            "SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY id LIMIT 1",
+            (sid,),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    txt = (row[0] or "") if row else ""
+    return re.sub(r"\s+", " ", txt).strip()[:200]
+
+
+def pinned_sessions(limit: int = 25) -> list:
+    sql = (
+        "SELECT id, source, COALESCE(display_name, title) AS name, title, started_at,"
+        " last_activity_at, message_count, profile_name FROM sessions"
+        " WHERE pinned = 1 AND hidden = 0"
+        " ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT ?"
+    )
+    return _query_sessions(sql, (limit,))
+
+
+def recent_sessions(days: int = 7, limit: int = 30) -> list:
+    since = _time.time() - days * 86400
+    sql = (
+        "SELECT id, source, COALESCE(display_name, title) AS name, title, started_at,"
+        " last_activity_at, message_count, profile_name, archived FROM sessions"
+        " WHERE hidden = 0 AND COALESCE(last_activity_at, started_at) >= ?"
+        " ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT ?"
+    )
+    return _query_sessions(sql, (since, limit), previews=True)
+
+
+def unlogged_candidates(recent: list, logs_window: dict, projects: list) -> list:
+    """Sessions that look like project work but have no tracker log on/after them.
+
+    Candidates are evidence, never conclusions — raise them for confirmation.
+    """
+    names = [p["name"] for p in projects]
+    nrm = {n: _norm(n) for n in names}
+    out, seen = [], set()
+    for s in recent:
+        sid = s["started_at"]
+        day = (
+            __import__("datetime")
+            .datetime.fromtimestamp(sid)
+            .strftime("%Y-%m-%d")
+            if sid
+            else None
+        )
+        hay = _norm((s.get("name") or "") + " " + (s.get("preview") or ""))
+        if not hay:
+            continue
+        for n, nn in nrm.items():
+            if len(nn) < 3 or nn not in hay:
+                continue
+            if day and any(e["date"] >= day for e in logs_window.get(n, [])):
+                continue
+            key = (n, s["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "project": n, "session_id": s["id"], "title": s.get("name") or "",
+                "when": day, "when_ts": sid, "preview": s.get("preview") or "",
+            })
+    out.sort(key=lambda x: x.get("when_ts") or 0, reverse=True)
+    return out[:10]
+
+
+def _brief_markdown(b: dict) -> str:
+    lines = [
+        "# Projects interview brief", "",
+        f"Fresh evidence built by the tracker Refresh: **{b['generated_at']}** "
+        f"(window: {b['window_days']} days) · checked {len(b['pinned'])} pinned + "
+        f"{len(b['recent'])} recent desktop sessions.", "",
+        "## Questions to ask (in order)", "",
+    ]
+    mapping = {
+        "1_done_this_week": "① Done this week — confirmations",
+        "2_stale_decisions": "② Stale — re-commit / park / drop",
+        "3_ideas": "③ New ideas / promotions",
+        "4_business_focus": "④ Business focus + next action",
+        "5_next_week": "⑤ Next week's 1-3 picks + candidate raises",
+    }
+    for key, title in mapping.items():
+        lines.append(f"### {title}")
+        qs = b["questions"].get(key) or []
+        if qs:
+            lines.extend(f"- {q}" for q in qs)
+        else:
+            lines.append("- (nothing to ask from the current evidence)")
+        lines.append("")
+    lines += ["## Unlogged-work candidates (confirm before logging)", ""]
+    if b["unlogged"]:
+        for c in b["unlogged"]:
+            lines.append(f"- **{c['project']}** — {c['when']} · {c['title']}")
+            if c["preview"]:
+                lines.append(f"  > {c['preview']}")
+    else:
+        lines.append("- none found in the window")
+    lines += ["", "## Session titles in the window", ""]
+    for s in b["recent"][:20]:
+        when = (
+            __import__("datetime").datetime.fromtimestamp(s["last_activity_at"] or s["started_at"]).strftime("%m-%d %H:%M")
+            if (s["last_activity_at"] or s["started_at"]) else "?"
+        )
+        lines.append(f"- {when} · {s.get('name') or '(untitled)'} · {s['message_count']} msgs"
+                     + (f" · matches: {', '.join(s['matches'])}" if s["matches"] else ""))
+    return "\n".join(lines)
+
+
+def build_brief(days: int = 7) -> dict:
+    """Evidence pass + updated interview questions for the weekly update.
+
+    Read-only. Also persists review_brief.json / review_brief.md in plugin data
+    so a manual interview (agent side) can pick the same evidence up.
+    """
+    import datetime as _dt
+    today = _today()
+    days = max(1, min(int(days or 7), 31))
+    review_packet = review(today=today)  # stale flags + checklist
+    data = list_projects(today=today)
+    projects = data["projects"]
+    logs = _sessions_window(days)
+    pinned = pinned_sessions()
+    recent = recent_sessions(days)
+    candidates = unlogged_candidates(recent, logs, projects)
+
+    # per-session project mentions
+    nrm = {p["name"]: _norm(p["name"]) for p in projects}
+    for s in recent:
+        hay = _norm((s.get("name") or "") + " " + (s.get("preview") or ""))
+        s["matches"] = [n for n, nn in nrm.items() if len(nn) >= 3 and nn in hay]
+
+    questions: dict[str, list] = {k: [] for k in (
+        "1_done_this_week", "2_stale_decisions", "3_ideas", "4_business_focus", "5_next_week")}
+    for name, entries in sorted(logs.items()):
+        if name in {p["name"] for p in projects}:
+            joined = "; ".join(f"{e['date']}: {e['text'][:80]}" for e in entries[-3:])
+            questions["1_done_this_week"].append(f"{name} — logged: {joined}. Confirm and mark anything done.")
+    for f in review_packet.get("stale_flags", []):
+        ev = f["evidence"]
+        questions["2_stale_decisions"].append(
+            f"{f['project']} ({f['section']}) idle {ev.get('days_idle') or '?'}d, "
+            f"last {ev.get('last_update') or '?'} · next action: {ev.get('next_action')} — re-commit / park / drop?")
+    for p in projects:
+        if p["section"] == "Ideas":
+            questions["3_ideas"].append(
+                f"{p['name']} — promote by {p.get('promote_by') or '(no date set)'}: promote with a phase, or park?")
+    for p in projects:
+        if p["section"] == "Ongoing (Business)":
+            questions["4_business_focus"].append(
+                f"{p['name']} (phase: {p.get('phase') or 'none'}) — current focus + next action?")
+    for c in candidates:
+        questions["5_next_week"].append(
+            f"Unlogged work on {c['project']} ({c['when']} · {c['title']}) — log it? what really happened?")
+    questions["5_next_week"].append("Pick 1-3 projects for next week.")
+
+    brief = {
+        "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "today": today,
+        "window_days": days,
+        "pinned": pinned,
+        "recent": recent,
+        "sessions_checked": {"pinned": len(pinned), "recent": len(recent)},
+        "unlogged": candidates,
+        "stale_flags": review_packet.get("stale_flags", []),
+        "healthy": review_packet.get("healthy", []),
+        "logged_window": {k: v for k, v in logs.items()},
+        "questions": questions,
+        "projects": projects,
+        "sources": {"state_db": str(_state_db_path() or "(not found)")},
+    }
+    brief["brief"] = (
+        "Run Pooh's projects interview now.\n\n"
+        "Load the skill `projects-routine` and follow its \"Sunday interview\" procedure "
+        "(evidence pass -> 5 question stages -> apply in one pass). You are in an interactive "
+        "desktop session: use clarify() for the interview questions (batch independent ones, "
+        "max 4-5 per call).\n\n"
+        f"An evidence refresh was already run at {brief['generated_at']}: "
+        f"{len(pinned)} pinned + {len(recent)} recent desktop sessions checked, "
+        f"{len(candidates)} unlogged-work candidates raised. Treat it as the first evidence pass — "
+        "verify anything you use (call projects_review for the staleness packet) and extend with "
+        "session_search only if something looks off.\n\n"
+        "Questions to ask (in order, one call per stage):\n"
+        + "".join(f"  {k}:\n" + "".join(f"    - {q}\n" for q in (questions[k] or ["(nothing to ask)"]))
+                  for k in ("1_done_this_week", "2_stale_decisions", "3_ideas", "4_business_focus", "5_next_week"))
+        + "\nThen apply all confirmed answers in one pass: project_log / project_set / project_item, "
+        "explicit section moves, update the tracker, write the vault week note (Hermes/Projects/Weekly "
+        "per the vault-delivery docker path), sync [[Projects]], and report every change back.\n"
+        "Nothing moves without his answer — never drop, park, promote, or complete silently."
+    )
+    try:
+        _data_dir().mkdir(parents=True, exist_ok=True)
+        (_data_dir() / "review_brief.json").write_text(
+            json.dumps(brief, indent=2, ensure_ascii=False, default=str))
+        (_data_dir() / "review_brief.md").write_text(_brief_markdown(brief), encoding="utf-8")
+        brief["persisted"] = True
+    except OSError:
+        brief["persisted"] = False
+    return brief

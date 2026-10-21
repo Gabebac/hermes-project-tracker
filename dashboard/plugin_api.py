@@ -87,3 +87,9 @@ def item(i: ItemIn) -> dict:
 @router.get("/review")
 def review() -> dict:
     return service.review()
+
+
+@router.get("/brief")
+def brief(days: int = 7) -> dict:
+    """Evidence pass: pinned + recent sessions, unlogged candidates, updated interview questions."""
+    return service.build_brief(days)
